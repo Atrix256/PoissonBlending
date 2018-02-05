@@ -4,6 +4,10 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#define STBI_MSC_SECURE_CRT
+#include "stb/stb_image_write.h"
+
 struct SImageInfo
 {
     stbi_uc* m_pixels   = nullptr;
@@ -25,9 +29,17 @@ struct SImageInfo
     }
 };
 
+bool WriteImage (const char *fileName, int width, int height, stbi_uc* pixels)
+{
+    return stbi_write_png(fileName, width, height, 3, pixels, 3 * width) != 0;
+}
+
 void NaivePaste (const SImageInfo &source, const SImageInfo &dest, int pasteX, int pasteY, const char* fileName)
 {
-    // TODO: implement this and the others. How do we make an image and save it?
+    // TODO: implement this and the others.
+
+    if (!WriteImage(fileName, source.m_width, source.m_height, source.m_pixels))
+        printf("Could not write %s\n", fileName);
 }
 
 int main(int argc, char** argv)
