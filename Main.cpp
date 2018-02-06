@@ -1,5 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
+#include <algorithm>
+#include <vector>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
@@ -29,6 +31,11 @@ struct SImageInfo
     }
 };
 
+struct SRect
+{
+    int x1, y1, x2, y2;
+};
+
 bool WriteImage (const char *fileName, int width, int height, stbi_uc* pixels)
 {
     return stbi_write_png(fileName, width, height, 3, pixels, 3 * width) != 0;
@@ -36,10 +43,57 @@ bool WriteImage (const char *fileName, int width, int height, stbi_uc* pixels)
 
 void NaivePaste (const SImageInfo &source, const SImageInfo &dest, int pasteX, int pasteY, const char* fileName)
 {
-    // TODO: implement this and the others.
+    // copy the destination image to an out image buffer
+    std::vector<stbi_uc> outPixels;
+    outPixels.resize(dest.m_width*dest.m_height * 3);
+    memcpy(&outPixels[0], dest.m_pixels, outPixels.size());
 
-    if (!WriteImage(fileName, source.m_width, source.m_height, source.m_pixels))
-        printf("Could not write %s\n", fileName);
+    // calculate details of paste, handling negative paste locations and images larger than the destination etc.
+    SRect sourceRect = { 0, 0, source.m_width, source.m_height };
+    SRect destRect = { pasteX, pasteY, pasteX + source.m_width, pasteY + source.m_height };
+
+    if (destRect.x1 < 0)
+    {
+        sourceRect.x1 -= destRect.x1;
+        destRect.x1 = 0;
+    }
+
+    if (destRect.y1 < 0)
+    {
+        sourceRect.y1 -= destRect.y1;
+        destRect.y1 = 0;
+    }
+
+    if (destRect.x2 >= dest.m_width)
+    {
+        int difference = (destRect.x2 - dest.m_width) + 1;
+        sourceRect.x2 -= difference;
+        destRect.x2 = dest.m_width - 1;
+    }
+
+    if (destRect.y2 >= dest.m_height)
+    {
+        int difference = (destRect.y2 - dest.m_height) + 1;
+        sourceRect.y2 -= difference;
+        destRect.y2 = dest.m_height - 1;
+    }
+
+    // naively paste the image
+    int copyWidth = sourceRect.x2 - sourceRect.x1;
+    int copyHeight = sourceRect.y2 - sourceRect.y1;
+    if (copyWidth > 0 && copyHeight > 0)
+    {
+        for (int y = 0; y < copyHeight; ++y)
+        {
+            stbi_uc* sourcePixels = &source.m_pixels[((sourceRect.y1 + y)*source.m_width + sourceRect.x1) * 3];
+            stbi_uc* destPixels = &outPixels[((destRect.y1 + y)*dest.m_width + destRect.x1) * 3];
+            memcpy(destPixels, sourcePixels, copyWidth * 3);
+        }
+    }
+
+    // write the file
+    if (!WriteImage(fileName, dest.m_width, dest.m_height, &outPixels[0]))
+        printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
 int main(int argc, char** argv)
@@ -55,7 +109,7 @@ int main(int argc, char** argv)
             return 1;
         }
 
-        if (!source.Load(argv[1]) || !source.Load(argv[2]))
+        if (!source.Load(argv[1]) || !dest.Load(argv[2]))
         {
             return 2;
         }
@@ -97,5 +151,7 @@ BLOG:
 - show resulting image, and also the one w/o least squares, and a naive paste too
 
 ? i wonder if this could help at all with style transfer? it would for color changes but not for feature changes.
+
+* paste the rocket at  250, 150
 
 */
