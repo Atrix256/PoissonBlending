@@ -96,7 +96,73 @@ void NaivePaste (const SImageInfo &source, const SImageInfo &dest, int pasteX, i
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
-void MakeImageGradient(const SImageInfo& source, std::vector<stbi_uc>& sourceGradient)
+void NaiveGradientPaste (const SImageInfo &source, std::vector<int>& sourceGradient, const SImageInfo &dest, int pasteX, int pasteY, const char* fileName)
+{
+    // copy the destination image to an out image buffer
+    std::vector<stbi_uc> outPixels;
+    outPixels.resize(dest.m_width*dest.m_height * 3);
+    memcpy(&outPixels[0], dest.m_pixels, outPixels.size());
+
+    // calculate details of paste, handling negative paste locations and images larger than the destination etc.
+    SRect sourceRect = { 0, 0, source.m_width, source.m_height };
+    SRect destRect = { pasteX, pasteY, pasteX + source.m_width, pasteY + source.m_height };
+
+    if (destRect.x1 < 0)
+    {
+        sourceRect.x1 -= destRect.x1;
+        destRect.x1 = 0;
+    }
+
+    if (destRect.y1 < 0)
+    {
+        sourceRect.y1 -= destRect.y1;
+        destRect.y1 = 0;
+    }
+
+    if (destRect.x2 >= dest.m_width)
+    {
+        int difference = (destRect.x2 - dest.m_width) + 1;
+        sourceRect.x2 -= difference;
+        destRect.x2 = dest.m_width - 1;
+    }
+
+    if (destRect.y2 >= dest.m_height)
+    {
+        int difference = (destRect.y2 - dest.m_height) + 1;
+        sourceRect.y2 -= difference;
+        destRect.y2 = dest.m_height - 1;
+    }
+
+    // naively paste the image gradient
+    int copyWidth = sourceRect.x2 - sourceRect.x1;
+    int copyHeight = sourceRect.y2 - sourceRect.y1;
+    if (copyWidth > 1 && copyHeight > 1)
+    {
+        for (int y = 1; y < copyHeight; ++y)
+        {
+            stbi_uc* sourcePixel = &source.m_pixels[((sourceRect.y1 + y)*source.m_width + sourceRect.x1) * 3];
+            int* sourceGradientPixel = &sourceGradient[((sourceRect.y1 + y)*source.m_width + sourceRect.x1) * 6];
+            stbi_uc* destPixel = &outPixels[((destRect.y1 + y)*dest.m_width + destRect.x1) * 3];
+            for (int x = 1; x < copyWidth; ++x)
+            {
+                destPixel[0] = destPixel[-3] + sourceGradientPixel[0];
+                destPixel[1] = destPixel[-2] + sourceGradientPixel[1];
+                destPixel[2] = destPixel[-1] + sourceGradientPixel[2];
+
+                // move to the next pixels
+                sourcePixel += 3;
+                sourceGradientPixel += 6;
+                destPixel += 3;
+            }
+        }
+    }
+
+    // write the file
+    if (!WriteImage(fileName, dest.m_width, dest.m_height, &outPixels[0]))
+        printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
+}
+
+void MakeImageGradient(const SImageInfo& source, std::vector<int>& sourceGradient)
 {
     // allocate space for the gradients
     sourceGradient.resize(source.m_width*source.m_height * 6);
@@ -106,20 +172,20 @@ void MakeImageGradient(const SImageInfo& source, std::vector<stbi_uc>& sourceGra
     const stbi_uc* sourcePixel = source.m_pixels;
     const stbi_uc* sourcePixelNextRow = sourcePixel + source.m_width * 3;
 
-    stbi_uc* destPixel = &sourceGradient[0];
+    int* destPixel = &sourceGradient[0];
     for (int y = 0; y < source.m_height-1; ++y)
     {
         for (int x = 0; x < source.m_width-1; ++x)
         {
             // calculate RGB dfdx
-            destPixel[0] = sourcePixel[3] - sourcePixel[0];
-            destPixel[1] = sourcePixel[4] - sourcePixel[1];
-            destPixel[2] = sourcePixel[5] - sourcePixel[2];
+            destPixel[0] = (int)sourcePixel[3] - (int)sourcePixel[0];
+            destPixel[1] = (int)sourcePixel[4] - (int)sourcePixel[1];
+            destPixel[2] = (int)sourcePixel[5] - (int)sourcePixel[2];
 
             // calculate RGB dfdy
-            destPixel[3] = sourcePixelNextRow[0] - sourcePixel[0];
-            destPixel[4] = sourcePixelNextRow[1] - sourcePixel[1];
-            destPixel[5] = sourcePixelNextRow[2] - sourcePixel[2];
+            destPixel[3] = (int)sourcePixelNextRow[0] - (int)sourcePixel[0];
+            destPixel[4] = (int)sourcePixelNextRow[1] - (int)sourcePixel[1];
+            destPixel[5] = (int)sourcePixelNextRow[2] - (int)sourcePixel[2];
 
             // move to the next pixels
             sourcePixel += 3;
@@ -129,10 +195,47 @@ void MakeImageGradient(const SImageInfo& source, std::vector<stbi_uc>& sourceGra
     }
 }
 
-void SaveImageGradient(const std::vector<stbi_uc>& sourceGradient, const char* fileName)
+void SaveImageGradient(const SImageInfo& source, const std::vector<int>& sourceGradient, const char* fileName)
 {
-    // todo: convert from +/-255 to +/-1, then to 0,1 and write that out.  maybe two images, one for x and one for y? or stack them horizontally?
-    int ijkl = 0;
+    // Save the gradient as a side by side double wide image.
+    // The left side is the x axis partial derivatives, the right side is the y axis.
+    std::vector<stbi_uc> outPixels;
+    outPixels.resize((source.m_width * 3 * source.m_height) * 3);
+
+    const stbi_uc* sourcePixel0 = source.m_pixels;
+    const int* sourcePixel1 = &sourceGradient[0];
+
+    for (int y = 0; y < source.m_height; ++y)
+    {
+        stbi_uc* destPixel0 = &outPixels[y*source.m_width * 9];
+        stbi_uc* destPixel1 = &outPixels[y*source.m_width * 9 + source.m_width * 3];
+        stbi_uc* destPixel2 = &outPixels[y*source.m_width * 9 + source.m_width * 6];
+        for (int x = 0; x < source.m_width; ++x)
+        {
+            destPixel0[0] = sourcePixel0[0];
+            destPixel0[1] = sourcePixel0[1];
+            destPixel0[2] = sourcePixel0[2];
+
+            destPixel1[0] = stbi_uc((sourcePixel1[0] + 255) / 2);
+            destPixel1[1] = stbi_uc((sourcePixel1[1] + 255) / 2);
+            destPixel1[2] = stbi_uc((sourcePixel1[2] + 255) / 2);
+
+            destPixel2[0] = stbi_uc((sourcePixel1[3] + 255) / 2);
+            destPixel2[1] = stbi_uc((sourcePixel1[4] + 255) / 2);
+            destPixel2[2] = stbi_uc((sourcePixel1[5] + 255) / 2);
+
+            // move to the next pixels
+            destPixel0 += 3;
+            destPixel1 += 3;
+            destPixel2 += 3;
+            sourcePixel0 += 3;
+            sourcePixel1 += 6;
+        }
+    }
+
+    // save the file
+    if (!WriteImage(fileName, source.m_width*3, source.m_height, &outPixels[0]))
+        printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
 int main(int argc, char** argv)
@@ -161,12 +264,15 @@ int main(int argc, char** argv)
     }
 
     // naive paste
-    NaivePaste(source, dest, pasteX, pasteY, "out_naive.png");
+    NaivePaste(source, dest, pasteX, pasteY, "out_paste_naive.png");
 
-    // make derivatives for the image and save them off
-    std::vector<stbi_uc> sourceGradient;
+    // make the source image gradient and save it
+    std::vector<int> sourceGradient;
     MakeImageGradient(source, sourceGradient);
-    SaveImageGradient(sourceGradient, "out_gradient.png");
+    SaveImageGradient(source, sourceGradient, "out_gradient.png");
+
+    // naive gradient paste
+    NaiveGradientPaste(source, sourceGradient, dest, pasteX, pasteY, "out_paste_naivegrad.png");
 
     //DerivativePaste(source, dest, pasteX, pasteY, "out")
 
@@ -176,6 +282,10 @@ int main(int argc, char** argv)
 /*
 
 TODO:
+
+* the partial derivatives add too much i think since they have a full sized delta on X and Y axis. Do i need to chop it in half or something maybe?
+* i think the mask really will be needed. the paste destroys the background!
+
 
 ? do we need a mask texture that's the same size as source?
 - command line for source, dest, dest position. maybe a source mask too?
