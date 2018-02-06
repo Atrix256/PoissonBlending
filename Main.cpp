@@ -96,6 +96,45 @@ void NaivePaste (const SImageInfo &source, const SImageInfo &dest, int pasteX, i
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
+void MakeImageGradient(const SImageInfo& source, std::vector<stbi_uc>& sourceGradient)
+{
+    // allocate space for the gradients
+    sourceGradient.resize(source.m_width*source.m_height * 6);
+    std::fill(sourceGradient.begin(), sourceGradient.end(), 0);
+
+    // make the gradients!
+    const stbi_uc* sourcePixel = source.m_pixels;
+    const stbi_uc* sourcePixelNextRow = sourcePixel + source.m_width * 3;
+
+    stbi_uc* destPixel = &sourceGradient[0];
+    for (int y = 0; y < source.m_height-1; ++y)
+    {
+        for (int x = 0; x < source.m_width-1; ++x)
+        {
+            // calculate RGB dfdx
+            destPixel[0] = sourcePixel[3] - sourcePixel[0];
+            destPixel[1] = sourcePixel[4] - sourcePixel[1];
+            destPixel[2] = sourcePixel[5] - sourcePixel[2];
+
+            // calculate RGB dfdy
+            destPixel[3] = sourcePixelNextRow[0] - sourcePixel[0];
+            destPixel[4] = sourcePixelNextRow[1] - sourcePixel[1];
+            destPixel[5] = sourcePixelNextRow[2] - sourcePixel[2];
+
+            // move to the next pixels
+            sourcePixel += 3;
+            sourcePixelNextRow += 3;
+            destPixel += 6;
+        }
+    }
+}
+
+void SaveImageGradient(const std::vector<stbi_uc>& sourceGradient, const char* fileName)
+{
+    // todo: convert from +/-255 to +/-1, then to 0,1 and write that out.  maybe two images, one for x and one for y? or stack them horizontally?
+    int ijkl = 0;
+}
+
 int main(int argc, char** argv)
 {
     SImageInfo source, dest, output;
@@ -121,8 +160,15 @@ int main(int argc, char** argv)
         }
     }
 
-    // do the pasting
+    // naive paste
     NaivePaste(source, dest, pasteX, pasteY, "out_naive.png");
+
+    // make derivatives for the image and save them off
+    std::vector<stbi_uc> sourceGradient;
+    MakeImageGradient(source, sourceGradient);
+    SaveImageGradient(sourceGradient, "out_gradient.png");
+
+    //DerivativePaste(source, dest, pasteX, pasteY, "out")
 
     return 0;
 }
@@ -131,7 +177,7 @@ int main(int argc, char** argv)
 
 TODO:
 
-- load and save images with stb
+? do we need a mask texture that's the same size as source?
 - command line for source, dest, dest position. maybe a source mask too?
 - solve with least squares if possible?
 - save result
