@@ -36,3 +36,8 @@
 *.exe
 *.out
 *.app
+.vs/PoissonBlending/v15/.suo
+*.opendb
+*.ipch
+*.user
+*.db
