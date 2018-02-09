@@ -3,6 +3,9 @@
 
 **/Debug/*.*
 **/Release/*.*
+**/.vs/*.*
+
+*.vcxproj.user
 
 # Compiled Object files
 *.slo
