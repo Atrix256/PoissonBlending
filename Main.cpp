@@ -19,10 +19,17 @@ struct SImageInfo
     int m_height = 0;
     int m_channels = 0;
 
-    bool Load(const char *fileName)
+    inline float* GetPixel (int x, int y)
+    {
+        return &m_pixels[y * m_width * m_channels + x * m_channels];
+    }
+
+    bool Load(const char *fileName, int desiredChannels = 3)
     {
         // load image
-        stbi_uc* pixels = stbi_load(fileName, &m_width, &m_height, &m_channels, 3);
+        m_channels = desiredChannels;
+        int channels = 0;
+        stbi_uc* pixels = stbi_load(fileName, &m_width, &m_height, &channels, desiredChannels);
         if (pixels == nullptr)
         {
             printf("Could not load file %s\n", fileName);
@@ -30,7 +37,7 @@ struct SImageInfo
         }
 
         // convert to float and convert from sRGB to linear
-        m_pixels.resize(m_width*m_height * 3);
+        m_pixels.resize(m_width*m_height*m_channels);
         stbi_uc* srcPixel = pixels;
         for (float& pixel : m_pixels)
         {
@@ -50,11 +57,11 @@ struct SRect
     int x1, y1, x2, y2;
 };
 
-bool WriteImage (const char *fileName, int width, int height, std::vector<float>& pixels)
+bool WriteImage (const char *fileName, int width, int height, int numChannels, std::vector<float>& pixels)
 {
     // convert from linear to sRGB, clamp, and convert to uint8.
     std::vector<stbi_uc> outPixels;
-    outPixels.resize(width*height * 3);
+    outPixels.resize(width*height * numChannels);
     float* srcPixel = &pixels[0];
     for (stbi_uc& pixel : outPixels)
     {
@@ -67,7 +74,7 @@ bool WriteImage (const char *fileName, int width, int height, std::vector<float>
         ++srcPixel;
     }
 
-    return stbi_write_png(fileName, width, height, 3, &outPixels[0], 3 * width) != 0;
+    return stbi_write_png(fileName, width, height, numChannels, &outPixels[0], numChannels * width) != 0;
 }
 
 void NaivePaste (const SImageInfo &source, const SImageInfo &dest, int pasteX, int pasteY, const char* fileName)
@@ -120,7 +127,7 @@ void NaivePaste (const SImageInfo &source, const SImageInfo &dest, int pasteX, i
     }
 
     // write the file
-    if (!WriteImage(fileName, dest.m_width, dest.m_height, outPixels))
+    if (!WriteImage(fileName, dest.m_width, dest.m_height, dest.m_channels, outPixels))
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
@@ -185,11 +192,11 @@ void NaiveGradientPaste (const SImageInfo &source, std::vector<float>& sourceGra
     }
 
     // write the file
-    if (!WriteImage(fileName, dest.m_width, dest.m_height, outPixels))
+    if (!WriteImage(fileName, dest.m_width, dest.m_height, dest.m_channels, outPixels))
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
-void MakeImageGradient(const SImageInfo& source, std::vector<float>& sourceGradient)
+void MakeImageGradient(const SImageInfo& source, const SImageInfo& mask, std::vector<float>& sourceGradient)
 {
     // allocate space for the gradients
     sourceGradient.resize(source.m_width*source.m_height * 6);
@@ -197,32 +204,41 @@ void MakeImageGradient(const SImageInfo& source, std::vector<float>& sourceGradi
 
     // make the gradients!
     const float* sourcePixel = &source.m_pixels[0];
-    const float* sourcePixelNextRow = sourcePixel + source.m_width * 3;
+    const float* sourcePixelNextRow = sourcePixel + source.m_width * source.m_channels;
+    const float* sourceMask = &mask.m_pixels[0];
 
     float* destPixel = &sourceGradient[0];
     for (int y = 0; y < source.m_height-1; ++y)
     {
         for (int x = 0; x < source.m_width-1; ++x)
         {
-            // calculate RGB dfdx
-            destPixel[0] = sourcePixel[3] - sourcePixel[0];
-            destPixel[1] = sourcePixel[4] - sourcePixel[1];
-            destPixel[2] = sourcePixel[5] - sourcePixel[2];
+            if (*sourceMask > 0.0f)
+            {
+                // calculate RGB dfdx
+                destPixel[0] = sourcePixel[3] - sourcePixel[0];
+                destPixel[1] = sourcePixel[4] - sourcePixel[1];
+                destPixel[2] = sourcePixel[5] - sourcePixel[2];
 
-            // calculate RGB dfdy
-            destPixel[3] = sourcePixelNextRow[0] - sourcePixel[0];
-            destPixel[4] = sourcePixelNextRow[1] - sourcePixel[1];
-            destPixel[5] = sourcePixelNextRow[2] - sourcePixel[2];
+                // calculate RGB dfdy
+                destPixel[3] = sourcePixelNextRow[0] - sourcePixel[0];
+                destPixel[4] = sourcePixelNextRow[1] - sourcePixel[1];
+                destPixel[5] = sourcePixelNextRow[2] - sourcePixel[2];
+            }
+            else
+            {
+                memset(destPixel, 0, sizeof(float) * 6);
+            }
 
             // move to the next pixels
             sourcePixel += 3;
             sourcePixelNextRow += 3;
+            sourceMask += 1;
             destPixel += 6;
         }
     }
 }
 
-void SaveImageGradient(const SImageInfo& source, const std::vector<float>& sourceGradient, const char* fileName)
+void SaveImageGradient(const SImageInfo& source, const SImageInfo& mask, const std::vector<float>& sourceGradient, const char* fileName)
 {
     // Save the gradient as a side by side double wide image.
     // The left side is the x axis partial derivatives, the right side is the y axis.
@@ -231,6 +247,7 @@ void SaveImageGradient(const SImageInfo& source, const std::vector<float>& sourc
 
     const float* sourcePixel0 = &source.m_pixels[0];
     const float* sourcePixel1 = &sourceGradient[0];
+    const float* sourceMask = &mask.m_pixels[0];
 
     for (int y = 0; y < source.m_height; ++y)
     {
@@ -239,17 +256,26 @@ void SaveImageGradient(const SImageInfo& source, const std::vector<float>& sourc
         float* destPixel2 = &outPixels[y*source.m_width * 9 + source.m_width * 6];
         for (int x = 0; x < source.m_width; ++x)
         {
-            destPixel0[0] = sourcePixel0[0];
-            destPixel0[1] = sourcePixel0[1];
-            destPixel0[2] = sourcePixel0[2];
+            if (*sourceMask > 0.0f)
+            {
+                destPixel0[0] = sourcePixel0[0];
+                destPixel0[1] = sourcePixel0[1];
+                destPixel0[2] = sourcePixel0[2];
 
-            destPixel1[0] = (sourcePixel1[0] * 0.5f) + 0.5f;
-            destPixel1[1] = (sourcePixel1[1] * 0.5f) + 0.5f;
-            destPixel1[2] = (sourcePixel1[2] * 0.5f) + 0.5f;
+                destPixel1[0] = (sourcePixel1[0] * 0.5f) + 0.5f;
+                destPixel1[1] = (sourcePixel1[1] * 0.5f) + 0.5f;
+                destPixel1[2] = (sourcePixel1[2] * 0.5f) + 0.5f;
 
-            destPixel2[0] = (sourcePixel1[3] * 0.5f) + 0.5f;
-            destPixel2[1] = (sourcePixel1[4] * 0.5f) + 0.5f;
-            destPixel2[2] = (sourcePixel1[5] * 0.5f) + 0.5f;
+                destPixel2[0] = (sourcePixel1[3] * 0.5f) + 0.5f;
+                destPixel2[1] = (sourcePixel1[4] * 0.5f) + 0.5f;
+                destPixel2[2] = (sourcePixel1[5] * 0.5f) + 0.5f;
+            }
+            else
+            {
+                memset(destPixel0, 0, sizeof(float) * 3);
+                memset(destPixel1, 0, sizeof(float) * 3);
+                memset(destPixel2, 0, sizeof(float) * 3);
+            }
 
             // move to the next pixels
             destPixel0 += 3;
@@ -257,46 +283,123 @@ void SaveImageGradient(const SImageInfo& source, const std::vector<float>& sourc
             destPixel2 += 3;
             sourcePixel0 += 3;
             sourcePixel1 += 6;
+            sourceMask += 1;
         }
     }
 
     // save the file
-    if (!WriteImage(fileName, source.m_width*3, source.m_height, outPixels))
+    if (!WriteImage(fileName, source.m_width*3, source.m_height, source.m_channels, outPixels))
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
+}
+
+void Trim(SImageInfo& source, SImageInfo& mask, int& pasteX, int& pasteY)
+{
+    // find the minimum bounding box based on the mask
+    SRect bb;
+    {
+        bb.x1 = mask.m_width;
+        bb.y1 = mask.m_height;
+        bb.x2 = 0;
+        bb.y2 = 0;
+        float *pixel = &mask.m_pixels[0];
+        for (int y = 0; y < mask.m_height; ++y)
+        {
+            for (int x = 0; x < mask.m_width; ++x)
+            {
+                if (*pixel > 0.0f)
+                {
+                    bb.x1 = std::min(x, bb.x1);
+                    bb.y1 = std::min(y, bb.y1);
+                    bb.x2 = std::max(x, bb.x2);
+                    bb.y2 = std::max(y, bb.y2);
+                }
+                pixel++;
+            }
+        }
+    }
+
+    // make a trimmed mask
+    {
+        SImageInfo newMask;
+        newMask.m_channels = mask.m_channels;
+        newMask.m_width = bb.x2 - bb.x1;
+        newMask.m_height = bb.y2 - bb.y1;
+        newMask.m_pixels.resize(newMask.m_width*newMask.m_height*newMask.m_channels);
+
+        for (int y = 0; y < newMask.m_height; ++y)
+        {
+            float* sourcePixel = mask.GetPixel(bb.x1, bb.y1 + y);
+            float* destPixel = newMask.GetPixel(0, y);
+            memcpy(destPixel, sourcePixel, sizeof(float)*newMask.m_width*newMask.m_channels);
+        }
+
+        mask = newMask;
+    }
+
+    // make a trimmed source image
+    {
+        SImageInfo newSource;
+        newSource.m_channels = source.m_channels;
+        newSource.m_width = bb.x2 - bb.x1;
+        newSource.m_height = bb.y2 - bb.y1;
+        newSource.m_pixels.resize(newSource.m_width*newSource.m_height*newSource.m_channels);
+
+        for (int y = 0; y < newSource.m_height; ++y)
+        {
+            float* sourcePixel = source.GetPixel(bb.x1, bb.y1 + y);
+            float* destPixel = newSource.GetPixel(0, y);
+            memcpy(destPixel, sourcePixel, sizeof(float)*newSource.m_width*newSource.m_channels);
+        }
+
+        source = newSource;
+    }
+
+    // adjust the paste location
+    pasteX += bb.x1;
+    pasteY += bb.y1;
 }
 
 int main(int argc, char** argv)
 {
-    SImageInfo source, dest, output;
+    SImageInfo source, mask, dest, output;
     int pasteX, pasteY;
 
     // get parameters and load images
     {
-        if (argc < 5)
+        if (argc < 6)
         {
-            printf("usage: <source> <dest> <x> <y>\n");
+            printf("usage: <source> <mask> <dest> <x> <y>\n");
             return 1;
         }
 
-        if (!source.Load(argv[1]) || !dest.Load(argv[2]))
+        if (!source.Load(argv[1]) || !mask.Load(argv[2], 1) || !dest.Load(argv[3]))
         {
             return 2;
         }
 
-        if (!sscanf(argv[3], "%i", &pasteX) || !sscanf(argv[4], "%i", &pasteY))
+        if (!sscanf(argv[4], "%i", &pasteX) || !sscanf(argv[5], "%i", &pasteY))
         {
             printf("could not read width or height\n");
             return 3;
         }
+
+        if (source.m_width != mask.m_width || source.m_height != mask.m_height)
+        {
+            printf("Source and mask must be same dimensions\n");
+            return 4;
+        }
     }
+
+    // Trim the source and mask to a bounding rectangle
+    Trim(source, mask, pasteX, pasteY);
 
     // naive paste
     NaivePaste(source, dest, pasteX, pasteY, "out_paste_naive.png");
 
     // make the source image gradient and save it
     std::vector<float> sourceGradient;
-    MakeImageGradient(source, sourceGradient);
-    SaveImageGradient(source, sourceGradient, "out_gradient.png");
+    MakeImageGradient(source, mask, sourceGradient);
+    SaveImageGradient(source, mask, sourceGradient, "out_gradient.png");
 
     // naive gradient paste
     NaiveGradientPaste(source, sourceGradient, dest, pasteX, pasteY, "out_paste_naivegrad.png");
@@ -312,26 +415,12 @@ TODO:
 
 ? try alpha fading the edges of the image in naive paste to hide the discontinuity?
 
-* use alpha channel as mask.
+* clamp colors
+ * could try to put constraints to not clamp in solve!
 
-* work in linear space
-
-* clamp colors i guess
-
-* the partial derivatives add too much i think since they have a full sized delta on X and Y axis. Do i need to chop it in half or something maybe?
- * i think the real issue is they are just constraints that need to be obeyed.
-
-* i think the mask really will be needed. the paste destroys the background!
-
-
-? do we need a mask texture that's the same size as source?
-- command line for source, dest, dest position. maybe a source mask too?
-- solve with least squares if possible?
-- save result
+* there is no such thing as a naive gradient paste. you have a 2 axis constraint :/
 
 - need some demo image(s) for blog post
-- show without the least squares fitting part
-- and show a naive paste!
 
 
 BLOG:
@@ -339,12 +428,12 @@ BLOG:
 - and link to stb
 - https://erkaman.github.io/posts/poisson_blending.html
 - http://cs.brown.edu/courses/cs129/results/proj2/taox/
-- link to least squares post too
+- link to least squares post too (erm... gauss elimination)
 
 - show resulting image, and also the one w/o least squares, and a naive paste too
 
 ? i wonder if this could help at all with style transfer? it would for color changes but not for feature changes.
 
-* paste the rocket at  250, 150
+* rocket.png rocketmask.png scenery.png 250 150
 
 */
