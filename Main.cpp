@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <algorithm>
 #include <vector>
+#include <unordered_map>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
@@ -20,6 +21,11 @@ struct SImageInfo
     int m_channels = 0;
 
     inline float* GetPixel (int x, int y)
+    {
+        return &m_pixels[y * m_width * m_channels + x * m_channels];
+    }
+
+    inline const float* GetPixel(int x, int y) const
     {
         return &m_pixels[y * m_width * m_channels + x * m_channels];
     }
@@ -77,7 +83,7 @@ bool WriteImage (const char *fileName, int width, int height, int numChannels, s
     return stbi_write_png(fileName, width, height, numChannels, &outPixels[0], numChannels * width) != 0;
 }
 
-void NaivePaste (const SImageInfo &source, const SImageInfo &dest, int pasteX, int pasteY, const char* fileName)
+void NaivePaste (const SImageInfo &source, const SImageInfo& mask, const SImageInfo &dest, int pasteX, int pasteY, const char* fileName)
 {
     // copy the destination image to an out image buffer
     std::vector<float> outPixels;
@@ -120,9 +126,22 @@ void NaivePaste (const SImageInfo &source, const SImageInfo &dest, int pasteX, i
     {
         for (int y = 0; y < copyHeight; ++y)
         {
-            const float* sourcePixels = &source.m_pixels[((sourceRect.y1 + y)*source.m_width + sourceRect.x1) * 3];
-            float* destPixels = &outPixels[((destRect.y1 + y)*dest.m_width + destRect.x1) * 3];
-            memcpy(destPixels, sourcePixels, copyWidth * 3 * sizeof(sourcePixels[0]));
+            const float* sourcePixel = source.GetPixel(sourceRect.x1, sourceRect.y1 + y);
+            const float* maskPixel = mask.GetPixel(sourceRect.x1, sourceRect.y1 + y);
+            float* destPixel = &outPixels[((destRect.y1 + y)*dest.m_width + destRect.x1) * 3];
+
+            for (int x = 0; x < copyWidth; ++x)
+            {
+                if (*maskPixel > 0.0f)
+                {
+                    memcpy(destPixel, sourcePixel, sizeof(float) * 3);
+                }
+
+                sourcePixel += 3;
+                maskPixel += 1;
+                destPixel += 3;
+            }
+            //memcpy(destPixels, sourcePixels, copyWidth * 3 * sizeof(sourcePixels[0]));
         }
     }
 
@@ -292,7 +311,7 @@ void SaveImageGradient(const SImageInfo& source, const SImageInfo& mask, const s
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
-void Trim(SImageInfo& source, SImageInfo& mask, int& pasteX, int& pasteY)
+void Trim(SImageInfo& source, SImageInfo& mask, int& pasteX, int& pasteY, size_t& numMaskPixels, std::unordered_map<size_t, size_t>& pixelIndexToMatrixColumn)
 {
     // find the minimum bounding box based on the mask
     SRect bb;
@@ -354,6 +373,30 @@ void Trim(SImageInfo& source, SImageInfo& mask, int& pasteX, int& pasteY)
         source = newSource;
     }
 
+    // make the pixelIndexToMatrixColumn map
+    numMaskPixels = 0;
+    {
+        float *pixel = &mask.m_pixels[0];
+        size_t pixelIndex = 0;
+        for (int y = 0; y < mask.m_height; ++y)
+        {
+            for (int x = 0; x < mask.m_width; ++x)
+            {
+                if (*pixel > 0.0f)
+                {
+                    pixelIndexToMatrixColumn.insert(std::make_pair(pixelIndex, numMaskPixels));
+                    numMaskPixels++;
+                }
+                else
+                {
+                    pixelIndexToMatrixColumn.insert(std::make_pair(pixelIndex, size_t(-1)));
+                }
+                pixel++;
+                pixelIndex++;
+            }
+        }
+    }
+
     // adjust the paste location
     pasteX += bb.x1;
     pasteY += bb.y1;
@@ -391,10 +434,12 @@ int main(int argc, char** argv)
     }
 
     // Trim the source and mask to a bounding rectangle
-    Trim(source, mask, pasteX, pasteY);
+    std::unordered_map<size_t, size_t> pixelIndexToMatrixColumn;
+    size_t numMaskPixels = 0;
+    Trim(source, mask, pasteX, pasteY, numMaskPixels, pixelIndexToMatrixColumn);
 
     // naive paste
-    NaivePaste(source, dest, pasteX, pasteY, "out_paste_naive.png");
+    NaivePaste(source, mask, dest, pasteX, pasteY, "out_paste_naive.png");
 
     // make the source image gradient and save it
     std::vector<float> sourceGradient;
@@ -413,12 +458,15 @@ int main(int argc, char** argv)
 
 TODO:
 
+* making matrix:
+ * some details to work out still but...
+ * make a row per pixel in the mask. simple formula of "4 times center minus the 4 neighbors", don't worry about being fancy
+ * then make a row per boundary condition pixel.
+ * solve.
+ * a detail to work out: do we make a row per pixel in the mask, only for the pixels which have all 4 neighbors in the mask? maybe yes...
+
 ? try alpha fading the edges of the image in naive paste to hide the discontinuity?
-
-* clamp colors
- * could try to put constraints to not clamp in solve!
-
-* there is no such thing as a naive gradient paste. you have a 2 axis constraint :/
+ * there is no such thing as a naive gradient paste. you have a 2 axis constraint :/
 
 - need some demo image(s) for blog post
 
@@ -432,7 +480,13 @@ BLOG:
 
 - show resulting image, and also the one w/o least squares, and a naive paste too
 
+* eigen better than my code. I reinvented the wheel to learn more about how the wheel works.
+
 ? i wonder if this could help at all with style transfer? it would for color changes but not for feature changes.
+
+* sRGB / clamp
+ * could try putting constraints not to clamp in solve. "Duality"?
+ * maybe also find the ones that clip, set those as "knowns" and resolve?
 
 * real time considerations:
  * could pre-calculate an inverted matrix. The matrix is only based on the mask, so could re-use for same image, or same mask but different images.
