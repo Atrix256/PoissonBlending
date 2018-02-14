@@ -434,6 +434,15 @@ BLOG:
 
 ? i wonder if this could help at all with style transfer? it would for color changes but not for feature changes.
 
+* real time considerations:
+ * could pre-calculate an inverted matrix. The matrix is only based on the mask, so could re-use for same image, or same mask but different images.
+  * you would make a vector of values consisting of desired derivatives and boundary constraints.
+  * then you would multiply to get pixel values.
+ * That matrix is large which sucks, but i've seen patterns in it, so may not need to actually store it, but can instead just get coefficients on the fly.
+ * unfortunately, every pixel would still need all boundary conditions and all derivatives to do the work ):
+ * so, seems infeasible to do in a pixel shader for instance.
+ * could maybe do lower res derivatives and boundary conditions and lerp etc though. shrug.
+
 * rocket.png rocketmask.png scenery.png 250 150
 
 */
