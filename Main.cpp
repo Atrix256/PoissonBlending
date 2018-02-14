@@ -215,6 +215,63 @@ void NaiveGradientPaste (const SImageInfo &source, std::vector<float>& sourceGra
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
+void PoissonBlend (const SImageInfo& source, const std::vector<float> sourceGradient, const SImageInfo& mask, SImageInfo& dest, int pasteX, int pasteY, size_t numMaskPixels, size_t numBorderPixels, std::unordered_map<size_t, size_t>& pixelIndexToMatrixColumn)
+{
+    // calculate how many pixels we actually need to solve for. It's the number of "on" pixels in the mask, minus any pixels that are on the border of that mask, since they are boundary conditions
+    size_t numSolvePixels = numMaskPixels - numBorderPixels;
+
+    // allocate space for our matrix
+    std::vector<float> matrix;
+    matrix.resize(numSolvePixels*numSolvePixels, 0.0f);
+
+    // fill in the rows of the matrix with the constraints about the value of pixels
+    size_t matrixRowBegin = 0;
+    size_t pixelIndex = -1;
+    for (size_t y = 0; y < mask.m_height; ++y)
+    {
+        for (size_t x = 0; x < mask.m_width; ++x)
+        {
+            ++pixelIndex;
+
+            // skip all pixels that don't show up in the matrix. That means they don't need to be solved for.
+            size_t matrixColumn = pixelIndexToMatrixColumn[pixelIndex];
+            if (matrixColumn == -1)
+                continue;
+
+            // figure out what matrix columns our neighbors belong in
+            size_t pixelIndexLeft = (y*mask.m_width) + (x - 1);
+            size_t pixelIndexRight = (y*mask.m_width) + (x + 1);
+            size_t pixelIndexUp = ((y - 1)*mask.m_width) + x;
+            size_t pixelIndexDown = ((y + 1)*mask.m_width) + x;
+
+            size_t matrixColumnLeft = pixelIndexToMatrixColumn[pixelIndexLeft];
+            size_t matrixColumnRight = pixelIndexToMatrixColumn[pixelIndexRight];
+            size_t matrixColumnUp = pixelIndexToMatrixColumn[pixelIndexUp];
+            size_t matrixColumnDown = pixelIndexToMatrixColumn[pixelIndexDown];
+
+            // write the values into the matrix row
+            matrix[matrixRowBegin + matrixColumn] = 4.0f;
+
+            if (matrixColumnLeft != -1)
+                matrix[matrixRowBegin + matrixColumnLeft] = -1.0f;
+
+            if (matrixColumnRight != -1)
+                matrix[matrixRowBegin + matrixColumnRight] = -1.0f;
+
+            if (matrixColumnUp != -1)
+                matrix[matrixRowBegin + matrixColumnUp] = -1.0f;
+
+            if (matrixColumnDown != -1)
+                matrix[matrixRowBegin + matrixColumnDown] = -1.0f;
+
+            // we've used this matrix row, so move down to the next
+            matrixRowBegin += numSolvePixels;
+        }
+    }
+
+    int ijkl = 0;
+}
+
 void MakeImageGradient(const SImageInfo& source, const SImageInfo& mask, std::vector<float>& sourceGradient)
 {
     // allocate space for the gradients
@@ -311,7 +368,31 @@ void SaveImageGradient(const SImageInfo& source, const SImageInfo& mask, const s
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
-void Trim(SImageInfo& source, SImageInfo& mask, int& pasteX, int& pasteY, size_t& numMaskPixels, std::unordered_map<size_t, size_t>& pixelIndexToMatrixColumn)
+bool IsBorderPixel (SImageInfo& mask, int x,int  y)
+{
+    // returns true if this pixel is on the edge of the mask.
+    // also returns true if it's beyond the mask for whatever that's worth.
+    if (x <= 0 || y <= 0)
+        return true;
+
+    if (x >= mask.m_width - 2 || y >= mask.m_height - 2)
+        return true;
+
+    float* pixel11 = mask.GetPixel(x, y);
+    float* pixel01 = pixel11 - mask.m_channels;
+    float* pixel21 = pixel11 + mask.m_channels;
+    float* pixel10 = pixel11 - mask.m_channels * mask.m_width;
+    float* pixel12 = pixel11 + mask.m_channels * mask.m_width;
+
+    return
+        *pixel11 == 0.0f ||
+        *pixel01 == 0.0f ||
+        *pixel21 == 0.0f ||
+        *pixel10 == 0.0f ||
+        *pixel12 == 0.0f;
+}
+
+void Trim(SImageInfo& source, SImageInfo& mask, int& pasteX, int& pasteY, size_t& numMaskPixels, size_t& numBorderPixels, std::unordered_map<size_t, size_t>& pixelIndexToMatrixColumn)
 {
     // find the minimum bounding box based on the mask
     SRect bb;
@@ -375,6 +456,8 @@ void Trim(SImageInfo& source, SImageInfo& mask, int& pasteX, int& pasteY, size_t
 
     // make the pixelIndexToMatrixColumn map
     numMaskPixels = 0;
+    numBorderPixels = 0;
+    size_t numInteriorPixels = 0;
     {
         float *pixel = &mask.m_pixels[0];
         size_t pixelIndex = 0;
@@ -382,9 +465,20 @@ void Trim(SImageInfo& source, SImageInfo& mask, int& pasteX, int& pasteY, size_t
         {
             for (int x = 0; x < mask.m_width; ++x)
             {
+                //bool
                 if (*pixel > 0.0f)
                 {
-                    pixelIndexToMatrixColumn.insert(std::make_pair(pixelIndex, numMaskPixels));
+                    if (IsBorderPixel(mask, x, y))
+                    {
+                        pixelIndexToMatrixColumn.insert(std::make_pair(pixelIndex, size_t(-1)));
+                        numBorderPixels++;
+                    }
+                    else
+                    {
+                        pixelIndexToMatrixColumn.insert(std::make_pair(pixelIndex, numInteriorPixels));
+                        numInteriorPixels++;
+                    }
+
                     numMaskPixels++;
                 }
                 else
@@ -436,18 +530,22 @@ int main(int argc, char** argv)
     // Trim the source and mask to a bounding rectangle
     std::unordered_map<size_t, size_t> pixelIndexToMatrixColumn;
     size_t numMaskPixels = 0;
-    Trim(source, mask, pasteX, pasteY, numMaskPixels, pixelIndexToMatrixColumn);
+    size_t numBorderPixels = 0;
+    Trim(source, mask, pasteX, pasteY, numMaskPixels, numBorderPixels, pixelIndexToMatrixColumn);
 
-    // naive paste
+    // do a naive paste and save it out
     NaivePaste(source, mask, dest, pasteX, pasteY, "out_paste_naive.png");
 
-    // make the source image gradient and save it
+    // make the source image gradient and save it out to an image
     std::vector<float> sourceGradient;
     MakeImageGradient(source, mask, sourceGradient);
     SaveImageGradient(source, mask, sourceGradient, "out_gradient.png");
 
     // naive gradient paste
     NaiveGradientPaste(source, sourceGradient, dest, pasteX, pasteY, "out_paste_naivegrad.png");
+
+    // Do a poisson blend
+    PoissonBlend(source, sourceGradient, mask, dest, pasteX, pasteY, numMaskPixels, numBorderPixels, pixelIndexToMatrixColumn);
 
     //DerivativePaste(source, dest, pasteX, pasteY, "out")
 
@@ -458,9 +556,18 @@ int main(int argc, char** argv)
 
 TODO:
 
+* instead of using a unordered_map for pixel index to matrix column, since it has ALL possible values in there, use a vector instead...
+
+* likely don't need "numBorderPixels". What you really want i think is "numInteriorPixels"
+ * probably don't need to know how many pixels are border pixels then either?
+ * likely need a map to make matrix to boundary conditions lookups easier
+
 * making matrix:
  * some details to work out still but...
  * make a row per pixel in the mask. simple formula of "4 times center minus the 4 neighbors", don't worry about being fancy
+  * although maybe fancy is better for showing the thing about inverted matrix being only based on mask
+  * also better for re-using the matrix for each color channel!
+  * move this to blog notes as appropriate after figuring it out.
  * then make a row per boundary condition pixel.
  * solve.
  * a detail to work out: do we make a row per pixel in the mask, only for the pixels which have all 4 neighbors in the mask? maybe yes...
@@ -477,6 +584,13 @@ BLOG:
 - https://erkaman.github.io/posts/poisson_blending.html
 - http://cs.brown.edu/courses/cs129/results/proj2/taox/
 - link to least squares post too (erm... gauss elimination)
+
+* talk about sRGB vs linear, and also clamping results.
+
+* show examples in 1d and then in 2d.
+* talk about why solving is needed
+ * 1D -> if you add up the derivatives, at the end you probably won't be at the right value.  This is a big jump in value then, so all  the error is concentrated into one place.  Solving makes the error be distributed evenly.
+ * 2D -> there is no way to integrate starting at different boundary conditions (right?). However, also distributes error across the image.
 
 - show resulting image, and also the one w/o least squares, and a naive paste too
 
@@ -495,7 +609,22 @@ BLOG:
  * That matrix is large which sucks, but i've seen patterns in it, so may not need to actually store it, but can instead just get coefficients on the fly.
  * unfortunately, every pixel would still need all boundary conditions and all derivatives to do the work ):
  * so, seems infeasible to do in a pixel shader for instance.
+  * could help in "offline" though not having to uniquely solve it per color channel.
  * could maybe do lower res derivatives and boundary conditions and lerp etc though. shrug.
+ * When laying data out, it should be sorted such that horizontal pixels are grouped together. This way, applying the solved image back to the destination image can be done via memcpy's
+  * You could likely make a structure to help this that was full of entries like: offset 3, 1 then copy 8 pixels.
+ * mention size and amount of memory used by the things: the gradient and the matrix for instance, and the vector you multiply the matrix by
+
+? that post about "don't invert that matrix"
+ * link to it and talk about how it's being done here because the inverted matrix is re-usable without going through the inversion steps again
+
+
+* other thoughts:
+ * would it be better to minimize error of luminance, instead of color value?
+ * even if sticking to color, the eye is more sensitive to green, so not all color channels are created equally.
+ * technically, some pixels in the mask might be useless and could be ignored.  Since we sample in a + formation, a convex corner pixel is useless.
+
+* does eric's post talk about any of this "solving once per mask" thing?
 
 * rocket.png rocketmask.png scenery.png 250 150
 
