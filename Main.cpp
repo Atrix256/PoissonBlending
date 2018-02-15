@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <vector>
 #include <unordered_map>
+#include <assert.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb/stb_image.h"
@@ -220,9 +221,10 @@ void PoissonBlend (const SImageInfo& source, const std::vector<float> sourceGrad
     // calculate how many pixels we actually need to solve for. It's the number of "on" pixels in the mask, minus any pixels that are on the border of that mask, since they are boundary conditions
     size_t numSolvePixels = numMaskPixels - numBorderPixels;
 
-    // allocate space for our matrix
-    std::vector<float> matrix;
+    // allocate space for our matrix and the inverted matrix
+    std::vector<float> matrix, matrixInverted;
     matrix.resize(numSolvePixels*numSolvePixels, 0.0f);
+    matrixInverted.resize(matrix.size(), 0.0f);
 
     // fill in the rows of the matrix with the constraints about the value of pixels
     size_t matrixRowBegin = 0;
@@ -269,7 +271,74 @@ void PoissonBlend (const SImageInfo& source, const std::vector<float> sourceGrad
         }
     }
 
-    int ijkl = 0;
+    // initialize the inverted matrix to identity
+    size_t index = 0;
+    for (size_t i = 0; i < numSolvePixels; ++i)
+    {
+        matrixInverted[index] = 1.0f;
+        index += numSolvePixels + 1;
+    }
+
+    // --------------- invert the matrix! ---------------
+
+    // for each column in the matrix...
+    printf("inverting matrix...\n");
+    for (size_t columnIndex = 0; columnIndex < numSolvePixels; ++columnIndex)
+    {
+        printf("\r%i%%", int(100.0f * float(columnIndex) / float(numSolvePixels)));
+
+        // find a row that has a non zero value in that row, that isn't a row we already processed
+        size_t rowIndex = columnIndex;
+        size_t rowBegin = rowIndex * numSolvePixels;
+        while (rowIndex < numSolvePixels && matrix[rowBegin + columnIndex] == 0.0f)
+        {
+            rowBegin += numSolvePixels;
+            ++rowIndex;
+        }
+        assert(rowIndex < numSolvePixels);
+
+        // swap that row with the row "columnIndex" in both the matrix and inverted matrix
+        std::swap_ranges(matrix.begin() + rowBegin, matrix.begin() + rowBegin + numSolvePixels, matrix.begin() + numSolvePixels * columnIndex);
+        std::swap_ranges(matrixInverted.begin() + rowBegin, matrixInverted.begin() + rowBegin + numSolvePixels, matrixInverted.begin() + numSolvePixels * columnIndex);
+        rowBegin = numSolvePixels * columnIndex;
+
+        // scale that row to have a value of 1.0 at that location, in both matrices
+        float scale = matrix[rowBegin + columnIndex];
+        if (scale != 1.0f)
+        {
+            for (size_t index = 0; index < numSolvePixels; ++index)
+            {
+                matrix[rowBegin + index] /= scale;
+                matrixInverted[rowBegin + index] /= scale;
+            }
+        }
+
+        // for all other rows that are not this row, subtract a multiple of this row to make them have a zero in that column
+        for (size_t rowIndex = 0; rowIndex < numSolvePixels; ++rowIndex)
+        {
+            if (rowIndex == columnIndex)
+                continue;
+
+            size_t otherRowBegin = rowIndex * numSolvePixels;
+            float scale = matrix[otherRowBegin + columnIndex];
+
+            if (scale != 0.0f)
+            {
+                for (size_t index = 0; index < numSolvePixels; ++index)
+                    matrix[otherRowBegin + index] -= matrix[rowBegin + index] * scale;
+            }
+        }
+    }
+
+    // now that we have the inverted matrix, we can use it to solve our desired derivative and boundary conditions for each color channel
+
+    std::vector<float> inputVector;
+    std::vector<float> outputVector;
+    inputVector.resize(numSolvePixels);
+    outputVector.resize(numSolvePixels);
+
+    // TODO: do red channel, green channel, then blue channel
+
 }
 
 void MakeImageGradient(const SImageInfo& source, const SImageInfo& mask, std::vector<float>& sourceGradient)
@@ -577,6 +646,7 @@ TODO:
 
 - need some demo image(s) for blog post
 
+? i wonder if least squares would be better? does it even apply here?
 
 BLOG:
 - link to github but put this source up
