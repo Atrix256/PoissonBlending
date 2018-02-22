@@ -151,71 +151,6 @@ void NaivePaste (const SImageInfo &source, const SImageInfo& mask, const SImageI
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
-void NaiveGradientPaste (const SImageInfo &source, std::vector<float>& sourceGradient, const SImageInfo &dest, int pasteX, int pasteY, const char* fileName)
-{
-    // copy the destination image to an out image buffer
-    std::vector<float> outPixels;
-    outPixels = dest.m_pixels;
-
-    // calculate details of paste, handling negative paste locations and images larger than the destination etc.
-    SRect sourceRect = { 0, 0, source.m_width, source.m_height };
-    SRect destRect = { pasteX, pasteY, pasteX + source.m_width, pasteY + source.m_height };
-
-    if (destRect.x1 < 0)
-    {
-        sourceRect.x1 -= destRect.x1;
-        destRect.x1 = 0;
-    }
-
-    if (destRect.y1 < 0)
-    {
-        sourceRect.y1 -= destRect.y1;
-        destRect.y1 = 0;
-    }
-
-    if (destRect.x2 >= dest.m_width)
-    {
-        int difference = (destRect.x2 - dest.m_width) + 1;
-        sourceRect.x2 -= difference;
-        destRect.x2 = dest.m_width - 1;
-    }
-
-    if (destRect.y2 >= dest.m_height)
-    {
-        int difference = (destRect.y2 - dest.m_height) + 1;
-        sourceRect.y2 -= difference;
-        destRect.y2 = dest.m_height - 1;
-    }
-
-    // naively paste the image gradient
-    int copyWidth = sourceRect.x2 - sourceRect.x1;
-    int copyHeight = sourceRect.y2 - sourceRect.y1;
-    if (copyWidth > 1 && copyHeight > 1)
-    {
-        for (int y = 1; y < copyHeight; ++y)
-        {
-            const float* sourcePixel = &source.m_pixels[((sourceRect.y1 + y)*source.m_width + sourceRect.x1) * 3];
-            const float* sourceGradientPixel = &sourceGradient[((sourceRect.y1 + y)*source.m_width + sourceRect.x1) * 6];
-            float* destPixel = &outPixels[((destRect.y1 + y)*dest.m_width + destRect.x1) * 3];
-            for (int x = 1; x < copyWidth; ++x)
-            {
-                destPixel[0] = destPixel[-3] + sourceGradientPixel[0];
-                destPixel[1] = destPixel[-2] + sourceGradientPixel[1];
-                destPixel[2] = destPixel[-1] + sourceGradientPixel[2];
-
-                // move to the next pixels
-                sourcePixel += 3;
-                sourceGradientPixel += 6;
-                destPixel += 3;
-            }
-        }
-    }
-
-    // write the file
-    if (!WriteImage(fileName, dest.m_width, dest.m_height, dest.m_channels, outPixels))
-        printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
-}
-
 void InvertMatrixDestructive (const size_t matrixDimension, std::vector<float>& matrix, std::vector<float>& matrixInverted)
 {
     // make sure the matrix and dimensions parameter match up
@@ -285,7 +220,26 @@ void InvertMatrixDestructive (const size_t matrixDimension, std::vector<float>& 
     }
 }
 
-void PoissonBlend (const SImageInfo& source, const std::vector<float> sourceGradient, const SImageInfo& mask, SImageInfo& dest, int pasteX, int pasteY, size_t numMaskPixels, size_t numBorderPixels, std::unordered_map<size_t, size_t>& pixelIndexToMatrixColumn)
+void MatrixMultiply (const std::vector<float>& matrix, const std::vector<float>& inputVector, std::vector<float>& outputVector)
+{
+    size_t size = inputVector.size();
+    
+    assert(matrix.size() == size * size);
+    
+    outputVector.resize(inputVector.size());
+
+    for (size_t column = 0; column < size; ++column)
+    {
+        outputVector[column] = 0;
+
+        for (size_t index = 0; index < size; ++index)
+        {
+            outputVector[column] += inputVector[index] * matrix[column * size + index];
+        }
+    }
+}
+
+void PoissonBlend (const SImageInfo& source, const std::vector<float> sourceGradient, const SImageInfo& mask, SImageInfo& dest, int pasteX, int pasteY, size_t numMaskPixels, size_t numBorderPixels, std::unordered_map<size_t, size_t>& pixelIndexToMatrixColumn, const char* fileName)
 {
     // calculate how many pixels we actually need to solve for. It's the number of "on" pixels in the mask, minus any pixels that are on the border of that mask, since they are boundary conditions
     size_t numSolvePixels = numMaskPixels - numBorderPixels;
@@ -345,15 +299,12 @@ void PoissonBlend (const SImageInfo& source, const std::vector<float> sourceGrad
 
     // now that we have the inverted matrix, we can use it to solve our desired derivative and boundary conditions for each color channel
 
-
-    // TODO: make this work / finish it! details have gotten a bit hazy
     // make the input vectors
     // fill in the rows of the matrix with the constraints about the value of pixels
     std::vector<float> inputVectorR, inputVectorG, inputVectorB;
     inputVectorR.resize(numSolvePixels, 0.0f);
     inputVectorG.resize(numSolvePixels, 0.0f);
     inputVectorB.resize(numSolvePixels, 0.0f);
-    matrixRowBegin = 0;
     pixelIndex = -1;
     for (size_t y = 0; y < mask.m_height; ++y)
     {
@@ -377,73 +328,97 @@ void PoissonBlend (const SImageInfo& source, const std::vector<float> sourceGrad
             size_t matrixColumnUp = pixelIndexToMatrixColumn[pixelIndexUp];
             size_t matrixColumnDown = pixelIndexToMatrixColumn[pixelIndexDown];
 
-            // input vector is the sum of the gradients but the gradients from the pixel FORWARD are negative
-            inputVectorR[pixelIndex] = 0.0f
+            // input vector is the sum of the gradients but the gradients from the pixel FORWARD are negative.
+            // This is just because of how we set up the equation for each line:
+            // 4 * Pixel - Left - Right - Up - Down = DeltaLeft - DeltaRight + DeltaUp - DeltaDown
+            // there are other ways we could have set up each equation (line) that are equivelant
+            inputVectorR[matrixColumn] = 0.0f
                 + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 0 + 0]
                 - sourceGradient[((y + 0) * mask.m_width + x + 1) * 6 + 0 + 0]
                 + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 3 + 0]
                 - sourceGradient[((y + 1) * mask.m_width + x + 0) * 6 + 3 + 0];
 
-            inputVectorG[pixelIndex] = 0.0f
+            inputVectorG[matrixColumn] = 0.0f
                 + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 0 + 1]
                 - sourceGradient[((y + 0) * mask.m_width + x + 1) * 6 + 0 + 1]
                 + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 3 + 1]
                 - sourceGradient[((y + 1) * mask.m_width + x + 0) * 6 + 3 + 1];
 
-            inputVectorB[pixelIndex] = 0.0f
+            inputVectorB[matrixColumn] = 0.0f
                 + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 0 + 2]
                 - sourceGradient[((y + 0) * mask.m_width + x + 1) * 6 + 0 + 2]
                 + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 3 + 2]
                 - sourceGradient[((y + 1) * mask.m_width + x + 0) * 6 + 3 + 2];
 
             // Anything which has a negative matrix index is a boundary condition pixel and must be ADDED to the right side of the equation (aka the input vector!) from the source image.
-
-            // TODO: finish this!
-
             if (matrixColumnLeft == -1)
             {
-                inputVectorR[pixelIndex] += source.m_pixels[pixelIndexLeft * 3 + 0];
-                inputVectorG[pixelIndex] += source.m_pixels[pixelIndexLeft * 3 + 1];
-                inputVectorB[pixelIndex] += source.m_pixels[pixelIndexLeft * 3 + 2];
+                inputVectorR[matrixColumn] += source.m_pixels[pixelIndexLeft * 3 + 0];
+                inputVectorG[matrixColumn] += source.m_pixels[pixelIndexLeft * 3 + 1];
+                inputVectorB[matrixColumn] += source.m_pixels[pixelIndexLeft * 3 + 2];
             }
 
             if (matrixColumnRight == -1)
             {
-                inputVectorR[pixelIndex] += source.m_pixels[pixelIndexRight * 3 + 0];
-                inputVectorG[pixelIndex] += source.m_pixels[pixelIndexRight * 3 + 1];
-                inputVectorB[pixelIndex] += source.m_pixels[pixelIndexRight * 3 + 2];
+                inputVectorR[matrixColumn] += source.m_pixels[pixelIndexRight * 3 + 0];
+                inputVectorG[matrixColumn] += source.m_pixels[pixelIndexRight * 3 + 1];
+                inputVectorB[matrixColumn] += source.m_pixels[pixelIndexRight * 3 + 2];
             }
 
             if (matrixColumnUp == -1)
             {
-                inputVectorR[pixelIndex] += source.m_pixels[pixelIndexUp * 3 + 0];
-                inputVectorG[pixelIndex] += source.m_pixels[pixelIndexUp * 3 + 1];
-                inputVectorB[pixelIndex] += source.m_pixels[pixelIndexUp * 3 + 2];
+                inputVectorR[matrixColumn] += source.m_pixels[pixelIndexUp * 3 + 0];
+                inputVectorG[matrixColumn] += source.m_pixels[pixelIndexUp * 3 + 1];
+                inputVectorB[matrixColumn] += source.m_pixels[pixelIndexUp * 3 + 2];
             }
 
             if (matrixColumnDown != -1)
             {
-                inputVectorR[pixelIndex] += source.m_pixels[pixelIndexDown * 3 + 0];
-                inputVectorG[pixelIndex] += source.m_pixels[pixelIndexDown * 3 + 1];
-                inputVectorB[pixelIndex] += source.m_pixels[pixelIndexDown * 3 + 2];
+                inputVectorR[matrixColumn] += source.m_pixels[pixelIndexDown * 3 + 0];
+                inputVectorG[matrixColumn] += source.m_pixels[pixelIndexDown * 3 + 1];
+                inputVectorB[matrixColumn] += source.m_pixels[pixelIndexDown * 3 + 2];
             }
-
-            // we've used this matrix row, so move down to the next
-            matrixRowBegin += numSolvePixels;
         }
     }
 
     // multiply the input matrices by the matrix to get the solution
     std::vector<float> outputVectorR, outputVectorG, outputVectorB;
-    outputVectorR.resize(numSolvePixels);
-    outputVectorG.resize(numSolvePixels);
-    outputVectorB.resize(numSolvePixels);
 
-    // TODO: multiply vectors by matrix to get results, make images etc!
-    //MatrixMultiply(matrixInverted, inputVectorR, outputVectorR);
-    //MatrixMultiply(matrixInverted, inputVectorG, outputVectorG);
-    //MatrixMultiply(matrixInverted, inputVectorB, outputVectorB);
+    // multiply vectors by matrix to get result
+    MatrixMultiply(matrixInverted, inputVectorR, outputVectorR);
+    MatrixMultiply(matrixInverted, inputVectorG, outputVectorG);
+    MatrixMultiply(matrixInverted, inputVectorB, outputVectorB);
 
+    // turn the solved pixels into an image
+    SImageInfo outPixels;
+    outPixels.m_width = mask.m_width;
+    outPixels.m_height = mask.m_height;
+    outPixels.m_channels = 3;
+    outPixels.m_pixels.resize(outPixels.m_width*outPixels.m_height * outPixels.m_channels);
+    pixelIndex = -1;
+    for (size_t y = 0; y < mask.m_height; ++y)
+    {
+        for (size_t x = 0; x < mask.m_width; ++x)
+        {
+            ++pixelIndex;
+            
+            size_t matrixColumn = pixelIndexToMatrixColumn[pixelIndex];
+            if (matrixColumn == -1)
+            {
+                outPixels.m_pixels[pixelIndex * 3 + 0] = 0.0f;
+                outPixels.m_pixels[pixelIndex * 3 + 1] = 0.0f;
+                outPixels.m_pixels[pixelIndex * 3 + 2] = 0.0f;
+                continue;
+            }
+            
+            outPixels.m_pixels[pixelIndex * 3 + 0] = outputVectorR[matrixColumn];
+            outPixels.m_pixels[pixelIndex * 3 + 1] = outputVectorG[matrixColumn];
+            outPixels.m_pixels[pixelIndex * 3 + 2] = outputVectorB[matrixColumn];
+        }
+    }
+
+    // Do a naive paste of the solved pixels onto the destination image
+    NaivePaste(outPixels, mask, dest, pasteX, pasteY, fileName);
 }
 
 void MakeImageGradient(const SImageInfo& source, const SImageInfo& mask, std::vector<float>& sourceGradient)
@@ -715,13 +690,8 @@ int main(int argc, char** argv)
     MakeImageGradient(source, mask, sourceGradient);
     SaveImageGradient(source, mask, sourceGradient, "out_gradient.png");
 
-    // naive gradient paste
-    NaiveGradientPaste(source, sourceGradient, dest, pasteX, pasteY, "out_paste_naivegrad.png");
-
     // Do a poisson blend
-    PoissonBlend(source, sourceGradient, mask, dest, pasteX, pasteY, numMaskPixels, numBorderPixels, pixelIndexToMatrixColumn);
-
-    //DerivativePaste(source, dest, pasteX, pasteY, "out")
+    PoissonBlend(source, sourceGradient, mask, dest, pasteX, pasteY, numMaskPixels, numBorderPixels, pixelIndexToMatrixColumn, "out_paste_grad.png");
 
     return 0;
 }
@@ -736,18 +706,7 @@ TODO:
  * probably don't need to know how many pixels are border pixels then either?
  * likely need a map to make matrix to boundary conditions lookups easier
 
-* making matrix:
- * some details to work out still but...
- * make a row per pixel in the mask. simple formula of "4 times center minus the 4 neighbors", don't worry about being fancy
-  * although maybe fancy is better for showing the thing about inverted matrix being only based on mask
-  * also better for re-using the matrix for each color channel!
-  * move this to blog notes as appropriate after figuring it out.
- * then make a row per boundary condition pixel.
- * solve.
- * a detail to work out: do we make a row per pixel in the mask, only for the pixels which have all 4 neighbors in the mask? maybe yes...
-
-? try alpha fading the edges of the image in naive paste to hide the discontinuity?
- * there is no such thing as a naive gradient paste. you have a 2 axis constraint :/
+ ? is there a way to generate the inverted matrix directly?
 
 - need some demo image(s) for blog post
 
@@ -792,7 +751,10 @@ BLOG:
 
 ? that post about "don't invert that matrix"
  * link to it and talk about how it's being done here because the inverted matrix is re-usable without going through the inversion steps again
+ 
 
+? try alpha fading the edges of the image in naive paste to hide the discontinuity?
+ * there is no such thing as a naive gradient paste. you have a 2 axis constraint :/
 
 * other thoughts:
  * would it be better to minimize error of luminance, instead of color value?
