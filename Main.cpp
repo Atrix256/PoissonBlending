@@ -216,15 +216,83 @@ void NaiveGradientPaste (const SImageInfo &source, std::vector<float>& sourceGra
         printf(__FUNCTION__ "() error: Could not write %s\n", fileName);
 }
 
+void InvertMatrixDestructive (const size_t matrixDimension, std::vector<float>& matrix, std::vector<float>& matrixInverted)
+{
+    // make sure the matrix and dimensions parameter match up
+    assert(matrix.size() == matrixDimension * matrixDimension);
+
+    // initialize the inverted matrix to identity
+    matrixInverted.resize(matrix.size(), 0.0f);
+    size_t index = 0;
+    for (size_t i = 0; i < matrixDimension; ++i)
+    {
+        matrixInverted[index] = 1.0f;
+        index += matrixDimension + 1;
+    }
+
+    // invert matrix
+
+    // for each column in the matrix...
+    printf("inverting matrix...\n");
+    for (size_t columnIndex = 0; columnIndex < matrixDimension; ++columnIndex)
+    {
+        printf("\r%i%%", int(100.0f * float(columnIndex) / float(matrixDimension)));
+
+        // find a row that has a non zero value in that row, that isn't a row we already processed
+        size_t rowIndex = columnIndex;
+        size_t rowBegin = rowIndex * matrixDimension;
+        while (rowIndex < matrixDimension && matrix[rowBegin + columnIndex] == 0.0f)
+        {
+            rowBegin += matrixDimension;
+            ++rowIndex;
+        }
+        assert(rowIndex < matrixDimension);
+
+        // swap that row with the row "columnIndex" in both the matrix and inverted matrix
+        std::swap_ranges(matrix.begin() + rowBegin, matrix.begin() + rowBegin + matrixDimension, matrix.begin() + matrixDimension * columnIndex);
+        std::swap_ranges(matrixInverted.begin() + rowBegin, matrixInverted.begin() + rowBegin + matrixDimension, matrixInverted.begin() + matrixDimension * columnIndex);
+        rowBegin = matrixDimension * columnIndex;
+
+        // scale that row to have a value of 1.0 at that location, in both matrices
+        float scale = matrix[rowBegin + columnIndex];
+        if (scale != 1.0f)
+        {
+            for (size_t index = 0; index < matrixDimension; ++index)
+            {
+                matrix[rowBegin + index] /= scale;
+                matrixInverted[rowBegin + index] /= scale;
+            }
+        }
+
+        // for all other rows that are not this row, subtract a multiple of this row to make them have a zero in that column
+        for (size_t rowIndex = 0; rowIndex < matrixDimension; ++rowIndex)
+        {
+            if (rowIndex == columnIndex)
+                continue;
+
+            size_t otherRowBegin = rowIndex * matrixDimension;
+            float scale = matrix[otherRowBegin + columnIndex];
+
+            if (scale != 0.0f)
+            {
+                for (size_t index = 0; index < matrixDimension; ++index)
+                {
+                    matrix[otherRowBegin + index] -= matrix[rowBegin + index] * scale;
+                    matrixInverted[otherRowBegin + index] -= matrixInverted[rowBegin + index] * scale;
+                }
+            }
+        }
+    }
+}
+
 void PoissonBlend (const SImageInfo& source, const std::vector<float> sourceGradient, const SImageInfo& mask, SImageInfo& dest, int pasteX, int pasteY, size_t numMaskPixels, size_t numBorderPixels, std::unordered_map<size_t, size_t>& pixelIndexToMatrixColumn)
 {
     // calculate how many pixels we actually need to solve for. It's the number of "on" pixels in the mask, minus any pixels that are on the border of that mask, since they are boundary conditions
     size_t numSolvePixels = numMaskPixels - numBorderPixels;
 
     // allocate space for our matrix and the inverted matrix
-    std::vector<float> matrix, matrixInverted;
+    std::vector<float> matrix;
     matrix.resize(numSolvePixels*numSolvePixels, 0.0f);
-    matrixInverted.resize(matrix.size(), 0.0f);
 
     // fill in the rows of the matrix with the constraints about the value of pixels
     size_t matrixRowBegin = 0;
@@ -271,73 +339,110 @@ void PoissonBlend (const SImageInfo& source, const std::vector<float> sourceGrad
         }
     }
 
-    // initialize the inverted matrix to identity
-    size_t index = 0;
-    for (size_t i = 0; i < numSolvePixels; ++i)
-    {
-        matrixInverted[index] = 1.0f;
-        index += numSolvePixels + 1;
-    }
-
-    // --------------- invert the matrix! ---------------
-
-    // for each column in the matrix...
-    printf("inverting matrix...\n");
-    for (size_t columnIndex = 0; columnIndex < numSolvePixels; ++columnIndex)
-    {
-        printf("\r%i%%", int(100.0f * float(columnIndex) / float(numSolvePixels)));
-
-        // find a row that has a non zero value in that row, that isn't a row we already processed
-        size_t rowIndex = columnIndex;
-        size_t rowBegin = rowIndex * numSolvePixels;
-        while (rowIndex < numSolvePixels && matrix[rowBegin + columnIndex] == 0.0f)
-        {
-            rowBegin += numSolvePixels;
-            ++rowIndex;
-        }
-        assert(rowIndex < numSolvePixels);
-
-        // swap that row with the row "columnIndex" in both the matrix and inverted matrix
-        std::swap_ranges(matrix.begin() + rowBegin, matrix.begin() + rowBegin + numSolvePixels, matrix.begin() + numSolvePixels * columnIndex);
-        std::swap_ranges(matrixInverted.begin() + rowBegin, matrixInverted.begin() + rowBegin + numSolvePixels, matrixInverted.begin() + numSolvePixels * columnIndex);
-        rowBegin = numSolvePixels * columnIndex;
-
-        // scale that row to have a value of 1.0 at that location, in both matrices
-        float scale = matrix[rowBegin + columnIndex];
-        if (scale != 1.0f)
-        {
-            for (size_t index = 0; index < numSolvePixels; ++index)
-            {
-                matrix[rowBegin + index] /= scale;
-                matrixInverted[rowBegin + index] /= scale;
-            }
-        }
-
-        // for all other rows that are not this row, subtract a multiple of this row to make them have a zero in that column
-        for (size_t rowIndex = 0; rowIndex < numSolvePixels; ++rowIndex)
-        {
-            if (rowIndex == columnIndex)
-                continue;
-
-            size_t otherRowBegin = rowIndex * numSolvePixels;
-            float scale = matrix[otherRowBegin + columnIndex];
-
-            if (scale != 0.0f)
-            {
-                for (size_t index = 0; index < numSolvePixels; ++index)
-                    matrix[otherRowBegin + index] -= matrix[rowBegin + index] * scale;
-            }
-        }
-    }
+    // invert the matrix
+    std::vector<float> matrixInverted;
+    InvertMatrixDestructive(numSolvePixels, matrix, matrixInverted);
 
     // now that we have the inverted matrix, we can use it to solve our desired derivative and boundary conditions for each color channel
 
-    std::vector<float> inputVector;
-    std::vector<float> outputVector;
-    inputVector.resize(numSolvePixels);
-    outputVector.resize(numSolvePixels);
 
-    // TODO: do red channel, green channel, then blue channel
+    // TODO: make this work / finish it! details have gotten a bit hazy
+    // make the input vectors
+    // fill in the rows of the matrix with the constraints about the value of pixels
+    std::vector<float> inputVectorR, inputVectorG, inputVectorB;
+    inputVectorR.resize(numSolvePixels, 0.0f);
+    inputVectorG.resize(numSolvePixels, 0.0f);
+    inputVectorB.resize(numSolvePixels, 0.0f);
+    matrixRowBegin = 0;
+    pixelIndex = -1;
+    for (size_t y = 0; y < mask.m_height; ++y)
+    {
+        for (size_t x = 0; x < mask.m_width; ++x)
+        {
+            ++pixelIndex;
+
+            // skip all pixels that don't show up in the matrix. That means they don't need to be solved for.
+            size_t matrixColumn = pixelIndexToMatrixColumn[pixelIndex];
+            if (matrixColumn == -1)
+                continue;
+
+            // figure out what matrix columns our neighbors belong in
+            size_t pixelIndexLeft = (y*mask.m_width) + (x - 1);
+            size_t pixelIndexRight = (y*mask.m_width) + (x + 1);
+            size_t pixelIndexUp = ((y - 1)*mask.m_width) + x;
+            size_t pixelIndexDown = ((y + 1)*mask.m_width) + x;
+
+            size_t matrixColumnLeft = pixelIndexToMatrixColumn[pixelIndexLeft];
+            size_t matrixColumnRight = pixelIndexToMatrixColumn[pixelIndexRight];
+            size_t matrixColumnUp = pixelIndexToMatrixColumn[pixelIndexUp];
+            size_t matrixColumnDown = pixelIndexToMatrixColumn[pixelIndexDown];
+
+            // input vector is the sum of the gradients but the gradients from the pixel FORWARD are negative
+            inputVectorR[pixelIndex] = 0.0f
+                + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 0 + 0]
+                - sourceGradient[((y + 0) * mask.m_width + x + 1) * 6 + 0 + 0]
+                + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 3 + 0]
+                - sourceGradient[((y + 1) * mask.m_width + x + 0) * 6 + 3 + 0];
+
+            inputVectorG[pixelIndex] = 0.0f
+                + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 0 + 1]
+                - sourceGradient[((y + 0) * mask.m_width + x + 1) * 6 + 0 + 1]
+                + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 3 + 1]
+                - sourceGradient[((y + 1) * mask.m_width + x + 0) * 6 + 3 + 1];
+
+            inputVectorB[pixelIndex] = 0.0f
+                + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 0 + 2]
+                - sourceGradient[((y + 0) * mask.m_width + x + 1) * 6 + 0 + 2]
+                + sourceGradient[((y + 0) * mask.m_width + x + 0) * 6 + 3 + 2]
+                - sourceGradient[((y + 1) * mask.m_width + x + 0) * 6 + 3 + 2];
+
+            // Anything which has a negative matrix index is a boundary condition pixel and must be ADDED to the right side of the equation (aka the input vector!) from the source image.
+
+            // TODO: finish this!
+
+            if (matrixColumnLeft == -1)
+            {
+                inputVectorR[pixelIndex] += source.m_pixels[pixelIndexLeft * 3 + 0];
+                inputVectorG[pixelIndex] += source.m_pixels[pixelIndexLeft * 3 + 1];
+                inputVectorB[pixelIndex] += source.m_pixels[pixelIndexLeft * 3 + 2];
+            }
+
+            if (matrixColumnRight == -1)
+            {
+                inputVectorR[pixelIndex] += source.m_pixels[pixelIndexRight * 3 + 0];
+                inputVectorG[pixelIndex] += source.m_pixels[pixelIndexRight * 3 + 1];
+                inputVectorB[pixelIndex] += source.m_pixels[pixelIndexRight * 3 + 2];
+            }
+
+            if (matrixColumnUp == -1)
+            {
+                inputVectorR[pixelIndex] += source.m_pixels[pixelIndexUp * 3 + 0];
+                inputVectorG[pixelIndex] += source.m_pixels[pixelIndexUp * 3 + 1];
+                inputVectorB[pixelIndex] += source.m_pixels[pixelIndexUp * 3 + 2];
+            }
+
+            if (matrixColumnDown != -1)
+            {
+                inputVectorR[pixelIndex] += source.m_pixels[pixelIndexDown * 3 + 0];
+                inputVectorG[pixelIndex] += source.m_pixels[pixelIndexDown * 3 + 1];
+                inputVectorB[pixelIndex] += source.m_pixels[pixelIndexDown * 3 + 2];
+            }
+
+            // we've used this matrix row, so move down to the next
+            matrixRowBegin += numSolvePixels;
+        }
+    }
+
+    // multiply the input matrices by the matrix to get the solution
+    std::vector<float> outputVectorR, outputVectorG, outputVectorB;
+    outputVectorR.resize(numSolvePixels);
+    outputVectorG.resize(numSolvePixels);
+    outputVectorB.resize(numSolvePixels);
+
+    // TODO: multiply vectors by matrix to get results, make images etc!
+    //MatrixMultiply(matrixInverted, inputVectorR, outputVectorR);
+    //MatrixMultiply(matrixInverted, inputVectorG, outputVectorG);
+    //MatrixMultiply(matrixInverted, inputVectorB, outputVectorB);
 
 }
 
